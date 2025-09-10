@@ -171,7 +171,7 @@ You can run NerdTracker in two ways:
    ```sql
    -- Create the table
    create table if not exists locations (
-     id serial primary key,  -- Unique identifier for each entry
+     id bigserial primary key,  -- Unique identifier for each entry
      "lat" float8,           -- Latitude of the location
      "lon" float8,           -- Longitude of the location
      "acc" int,              -- Accuracy of the reported location in meters
