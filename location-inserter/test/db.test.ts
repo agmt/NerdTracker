@@ -72,7 +72,10 @@ const testCases = [
 	{
 		name: 'if 5 points are closer 100m, only update the last record',
 		before: async () => {
-			for (let i = 0; i < 5; i++) {
+			for (let i = 0; i < 6; i++) {
+				await client.query("INSERT INTO locations_no_dups(lat, lon, tid, tst) VALUES ($2, 37.0000, 'AB', $1)", [Generator.get(), 30 + i]);
+			}
+			for (let i = 0; i < 12; i++) {
 				await client.query("INSERT INTO locations_no_dups(lat, lon, tid, tst) VALUES (55.0000, 37.0000, 'AB', $1)", [Generator.get()]);
 			}
 		},
@@ -81,8 +84,8 @@ const testCases = [
 			await client.query("INSERT INTO locations_no_dups(lat, lon, tid, tst) VALUES (55.0001, 37.0001, 'AB', $1)", [Generator.get()]); // ~13m
 		},
 		compare: async (oldRows: any[], newRows: any[]) => {
-			expect(oldRows.length).toBe(5);
-			expect(newRows.length).toBe(5);
+			expect(oldRows.length).toBe(16); // 4 old + 6 prev (2 diff + 4 same) + 6 rotating
+			expect(newRows.length).toBe(16);
 			expect(newRows[newRows.length - 1]['lat']).toBe(55.0001);
 			expect(newRows[newRows.length - 1]['lon']).toBe(37.0001);
 			expect(Number(newRows[newRows.length - 1]['tst'])).toBe(Generator.last());
@@ -102,7 +105,7 @@ const testCases = [
 		},
 		compare: async (oldRows: any[], newRows: any[]) => {
 			expect(oldRows.length).toBe(10);
-			expect(newRows.length).toBe(10);
+			expect(newRows.length).toBe(12);
 			expect(newRows[newRows.length - 1]['lat']).toBe(55.0001);
 			expect(newRows[newRows.length - 1]['lon']).toBe(37.0001);
 			expect(Number(newRows[newRows.length - 1]['tst'])).toBe(Generator.last());

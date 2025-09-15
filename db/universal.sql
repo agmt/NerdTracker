@@ -65,7 +65,7 @@ to anon
 with check (true);
 
 -- Automatically detect if reporter stays in 1 place
-CREATE VIEW locations_no_dups AS
+CREATE OR REPLACE VIEW locations_no_dups AS
 SELECT *
 FROM locations;
 
@@ -77,75 +77,94 @@ LANGUAGE plpgsql
 SECURITY DEFINER  -- run with owner's privileges
 AS $$
 DECLARE
-    RECENT_LOCATIONS_LIMIT CONSTANT INT := 10;
-    MAX_PROXIMITY_METERS CONSTANT INT := 100;
-    MIN_WITHIN_RANGE CONSTANT INT := 5;
+	PREV_LOCATIONS_LEN CONSTANT INT := 6;
+    CUR_LOCATIONS_LEN CONSTANT INT := 6;
+    MAX_PROXIMITY_METERS CONSTANT INT := 20;
 
-    rec locations;
-    most_recent_rec locations;
-    result locations;
-    within_range_cnt INT := 0;
-    is_recent_location_in_range BOOLEAN := FALSE;
-
-    is_close BOOLEAN;
+    prev_lat FLOAT8;
+	prev_lon FLOAT8;
+	prev_alt FLOAT8;
+	cur_lat FLOAT8;
+	cur_lon FLOAT8;
+	cur_alt FLOAT8;
+	cur_group_oldest_id BIGINT;
+	result locations;
 BEGIN
-    -- Select the last LAST_LOCATIONS_COUNT locations from the locations table
-    -- Filter out NULL lat/lon records
-    FOR rec IN
-        SELECT *
-        FROM locations loc
-        WHERE loc.lat IS NOT NULL
-            AND loc.lon IS NOT NULL
-            AND loc.tst IS NOT NULL
-            AND loc.tid = NEW.tid -- Original code doesn't check if recent points belong to the same device
-        ORDER BY tst DESC
-        LIMIT RECENT_LOCATIONS_LIMIT
-    LOOP
-        is_close := earth_distance(
-            ll_to_earth(NEW.lat, NEW.lon),
-            ll_to_earth(rec.lat, rec.lon)
-        ) < MAX_PROXIMITY_METERS;
+    -- Find median of previous locations
+	WITH prev AS (
+		SELECT *
+		FROM locations
+		WHERE tid = NEW.tid
+			AND lat IS NOT NULL
+			AND lon IS NOT NULL
+			AND tst IS NOT NULL
+		ORDER BY tst DESC, id DESC
+		LIMIT PREV_LOCATIONS_LEN
+		OFFSET CUR_LOCATIONS_LEN
+	)
+	SELECT
+		percentile_cont(0.5) WITHIN GROUP (ORDER BY lat),
+		percentile_cont(0.5) WITHIN GROUP (ORDER BY lon),
+		percentile_cont(0.5) WITHIN GROUP (ORDER BY alt)
+	INTO
+		prev_lat, prev_lon, prev_alt
+	FROM prev;
 
-        -- Count all recent records that are within proximity
-        IF is_close
-        THEN
-            within_range_cnt := within_range_cnt + 1;
-        END IF;
+	-- Find median of current locations
+	WITH recent AS (
+		SELECT *
+		FROM locations
+		WHERE tid = NEW.tid
+			AND lat IS NOT NULL
+			AND lon IS NOT NULL
+			AND tst IS NOT NULL
+		ORDER BY tst DESC, id DESC
+		LIMIT CUR_LOCATIONS_LEN
+	)
+	SELECT
+		(SELECT id FROM recent ORDER BY tst, id LIMIT 1),
+		percentile_cont(0.5) WITHIN GROUP (ORDER BY lat),
+		percentile_cont(0.5) WITHIN GROUP (ORDER BY lon),
+		percentile_cont(0.5) WITHIN GROUP (ORDER BY alt)
+	INTO
+		cur_group_oldest_id,
+		cur_lat, cur_lon, cur_alt
+	FROM recent;
 
-        -- For the first (most recent) record only: record if it's within range
-        IF most_recent_rec IS NULL
-        THEN
-            is_recent_location_in_range := is_close;
-            most_recent_rec := rec;
-        END IF;
-    END LOOP;
-
-    -- Check if we should update or insert
+    -- Check if we should rotate or insert
     -- 1. The most recent location must be valid (non-null lat/lon)
     -- 2. The most recent location must be within range
     -- 3. At least MIN_WITHIN_RANGE locations must be within the hangout distance
-    IF is_recent_location_in_range AND (within_range_cnt >= MIN_WITHIN_RANGE)
+    IF
+		cur_group_oldest_id IS NOT NULL
+		AND prev_lat IS NOT NULL
+		AND prev_lon IS NOT NULL
+		AND cur_lat IS NOT NULL
+		AND cur_lon IS NOT NULL
+		AND earth_distance(
+			ll_to_earth(prev_lat, prev_lon),
+			ll_to_earth(cur_lat, cur_lon)
+		) < MAX_PROXIMITY_METERS
     THEN
-        NEW.id := most_recent_rec.id;
-
+		-- Rotate: delete the oldest in the current group and insert the new one
+		--         no one `current` location becomes `previous`
         DELETE FROM locations
-        WHERE id = most_recent_rec.id;
-
-        INSERT INTO locations
-        SELECT NEW.*
-        RETURNING * INTO result;
+        WHERE id = cur_group_oldest_id;
     ELSE
-        NEW.id := nextval('locations_id_seq');
-
-        INSERT INTO locations
-        SELECT NEW.*
-        RETURNING * INTO result;
+        -- Insert new location; the oldest `current` location becomes `previous`
     END IF;
-    RETURN result;
+
+	NEW.id := nextval('locations_id_seq');
+
+	INSERT INTO locations
+	SELECT NEW.*
+	RETURNING * INTO result;
+
+	RETURN result;
 END;
 $$;
 
-CREATE TRIGGER trg_locations_no_dups_insert_trigger
+CREATE OR REPLACE TRIGGER trg_locations_no_dups_insert_trigger
 INSTEAD OF INSERT ON locations_no_dups
 FOR EACH ROW
 EXECUTE FUNCTION locations_no_dups_insert_trigger();
